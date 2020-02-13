@@ -127,7 +127,6 @@ const UserAccessKeys = () => {
           </Row>
         </Alert>
         <Table
-          maxHeight="300px"
           columns={columns}
           data={tableData}
           placeholder={
