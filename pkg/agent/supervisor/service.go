@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/deviceplane/deviceplane/pkg/spec"
+	"github.com/pkg/errors"
 
 	"github.com/apex/log"
 
-	"github.com/deviceplane/deviceplane/pkg/agent/utils"
 	"github.com/deviceplane/deviceplane/pkg/agent/validator"
 	"github.com/deviceplane/deviceplane/pkg/agent/variables"
 	"github.com/deviceplane/deviceplane/pkg/engine"
@@ -131,7 +131,7 @@ func (s *ServiceSupervisor) reconcileLoop() {
 			}()
 		}
 
-		instances, err := utils.ContainerList(ctx, s.engine, nil, map[string]string{
+		instances, err := containerList(ctx, s.engine, nil, map[string]string{
 			models.ApplicationLabel: s.applicationID,
 			models.ServiceLabel:     s.serviceName,
 		}, true)
@@ -150,21 +150,56 @@ func (s *ServiceSupervisor) reconcileLoop() {
 			}
 
 			startCanceler()
+
+			s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+				CurrentReleaseID: release,
+				CurrentState:     models.ServiceImagePulling,
+			})
 			if err = s.imagePuller.Pull(ctx, service.Image); err != nil {
+				s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+					CurrentReleaseID: release,
+					CurrentState:     models.ServiceImagePulling,
+					ErrorMessage:     errors.WithMessage(err, "pulling image").Error(),
+				})
 				goto cont
 			}
 
 			s.sendKeepAliveDeactivate()
 
-			if err = utils.ContainerStop(ctx, s.engine, instance.ID); err != nil {
+			s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+				CurrentReleaseID: release,
+				CurrentState:     models.ServiceRemovingPreviousContainer,
+			})
+			if err = containerStop(ctx, s.engine, instance.ID); err != nil {
+				s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+					CurrentReleaseID: release,
+					CurrentState:     models.ServiceRemovingPreviousContainer,
+					ErrorMessage:     errors.WithMessage(err, "stopping previous container").Error(),
+				})
 				goto cont
 			}
-			if err = utils.ContainerRemove(ctx, s.engine, instance.ID); err != nil {
+			if err = containerRemove(ctx, s.engine, instance.ID); err != nil {
+				s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+					CurrentReleaseID: release,
+					CurrentState:     models.ServiceRemovingPreviousContainer,
+					ErrorMessage:     errors.WithMessage(err, "removing previous container").Error(),
+				})
 				goto cont
 			}
 		} else {
 			startCanceler()
-			s.imagePuller.Pull(ctx, service.Image)
+			s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+				CurrentReleaseID: release,
+				CurrentState:     models.ServiceImagePulling,
+			})
+			if err = s.imagePuller.Pull(ctx, service.Image); err != nil {
+				s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+					CurrentReleaseID: release,
+					CurrentState:     models.ServiceImagePulling,
+					ErrorMessage:     errors.WithMessage(err, "pulling image").Error(),
+				})
+				goto cont
+			}
 		}
 
 		s.sendKeepAliveDeactivate()
@@ -180,12 +215,21 @@ func (s *ServiceSupervisor) reconcileLoop() {
 			}
 		}
 
-		if _, err = utils.ContainerCreate(
+		s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+			CurrentReleaseID: release,
+			CurrentState:     models.ServiceContainerCreating,
+		})
+		if _, err = containerCreate(
 			ctx,
 			s.engine,
 			strings.Join([]string{s.serviceName, hash.ShortHash(s.applicationID), spec.ShortHash(service, s.serviceName)}, "-"),
 			s.transformService(spec.WithStandardLabels(service, s.applicationID, s.serviceName)),
 		); err != nil {
+			s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+				CurrentReleaseID: release,
+				CurrentState:     models.ServiceContainerCreating,
+				ErrorMessage:     errors.WithMessage(err, "creating container").Error(),
+			})
 			goto cont
 		}
 
@@ -271,7 +315,7 @@ func (s *ServiceSupervisor) keepAlive() {
 				continue
 			}
 
-			instances, err := utils.ContainerList(s.ctx, s.engine, nil, map[string]string{
+			instances, err := containerList(s.ctx, s.engine, nil, map[string]string{
 				models.ApplicationLabel: s.applicationID,
 				models.ServiceLabel:     s.serviceName,
 				models.HashLabel:        spec.Hash(service, s.serviceName),
@@ -288,13 +332,40 @@ func (s *ServiceSupervisor) keepAlive() {
 			// TODO: filter down to just one instance if we find more
 			instance := instances[0]
 
-			if !instance.Running {
-				if err = utils.ContainerStart(s.ctx, s.engine, instance.ID); err != nil {
-					continue
-				}
+			if instance.State != models.ServiceContainerRunning {
+				inspectResponse, err := s.engine.InspectContainer(s.ctx, instance.ID)
+				s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+					CurrentReleaseID: release,
+					CurrentState:     instance.State,
+					ErrorMessage: func() string {
+						if err != nil {
+							return "unknown error, cannot inspect container"
+						}
+						if inspectResponse.ExitCode != nil {
+							message := fmt.Sprintf(
+								"container exited with exit code %d",
+								*inspectResponse.ExitCode,
+							)
+							if inspectResponse.Error == "" {
+								return message
+							}
+							return fmt.Sprintf("%s (error: %s)",
+								message,
+								inspectResponse.Error,
+							)
+						}
+						return ""
+					}(),
+				})
+
+				containerStart(s.ctx, s.engine, instance.ID)
+				continue
 			}
 
-			s.reporter.SetServiceRelease(s.serviceName, release)
+			s.reporter.SetServiceStatus(s.serviceName, models.SetDeviceServiceStatusRequest{
+				CurrentReleaseID: release,
+				CurrentState:     instance.State,
+			})
 			s.containerID.Store(instance.ID)
 		}
 	}

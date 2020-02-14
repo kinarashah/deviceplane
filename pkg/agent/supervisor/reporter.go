@@ -12,16 +12,16 @@ import (
 
 type Reporter struct {
 	applicationID           string
-	reportApplicationStatus func(ctx *dpcontext.Context, applicationID string, currentRelease string) error
-	reportServiceStatus     func(ctx *dpcontext.Context, applicationID, service, currentRelease string) error
+	reportApplicationStatus func(ctx *dpcontext.Context, applicationID, currentRelease string) error
+	reportServiceStatus     func(ctx *dpcontext.Context, applicationID, service, currentRelease string, state models.ServiceState, errorMessage string) error
 
 	desiredApplicationRelease      string
 	desiredApplicationServiceNames map[string]struct{}
 	reportedApplicationRelease     string
 	applicationStatusReporterDone  chan struct{}
 
-	serviceReleases           map[string]string
-	reportedServiceReleases   map[string]string
+	serviceStatuses           map[string]models.SetDeviceServiceStatusRequest
+	reportedServiceStatuses   map[string]models.SetDeviceServiceStatusRequest
 	serviceStatusReporterDone chan struct{}
 
 	once   sync.Once
@@ -33,7 +33,7 @@ type Reporter struct {
 func NewReporter(
 	applicationID string,
 	reportApplicationStatus func(ctx *dpcontext.Context, applicationID, currentRelease string) error,
-	reportServiceStatus func(ctx *dpcontext.Context, applicationID, service, currentRelease string) error,
+	reportServiceStatus func(ctx *dpcontext.Context, applicationID, service, currentRelease string, state models.ServiceState, errorMessage string) error,
 ) *Reporter {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Reporter{
@@ -43,8 +43,8 @@ func NewReporter(
 
 		desiredApplicationServiceNames: make(map[string]struct{}),
 		applicationStatusReporterDone:  make(chan struct{}),
-		serviceReleases:                make(map[string]string),
-		reportedServiceReleases:        make(map[string]string),
+		serviceStatuses:                make(map[string]models.SetDeviceServiceStatusRequest),
+		reportedServiceStatuses:        make(map[string]models.SetDeviceServiceStatusRequest),
 		serviceStatusReporterDone:      make(chan struct{}),
 
 		ctx:    ctx,
@@ -69,9 +69,9 @@ func (r *Reporter) SetDesiredApplication(release string, applicationConfig map[s
 	})
 }
 
-func (r *Reporter) SetServiceRelease(serviceName, release string) {
+func (r *Reporter) SetServiceStatus(serviceName string, status models.SetDeviceServiceStatusRequest) {
 	r.lock.Lock()
-	r.serviceReleases[serviceName] = release
+	r.serviceStatuses[serviceName] = status
 	r.lock.Unlock()
 }
 
@@ -97,8 +97,8 @@ func (r *Reporter) applicationStatusReporter() {
 			goto cont
 		}
 		for serviceName := range r.desiredApplicationServiceNames {
-			release, ok := r.serviceReleases[serviceName]
-			if !ok || release != releaseToReport {
+			status, ok := r.serviceStatuses[serviceName]
+			if !ok || status.CurrentReleaseID != releaseToReport {
 				r.lock.RUnlock()
 				goto cont
 			}
@@ -136,21 +136,31 @@ func (r *Reporter) serviceStatusReporter() {
 		var cancel func()
 
 		r.lock.RLock()
-		diff := make(map[string]string)
-		copy := make(map[string]string)
-		for service, release := range r.serviceReleases {
-			reportedRelease, ok := r.reportedServiceReleases[service]
-			if !ok || reportedRelease != release {
-				diff[service] = release
+		diff := make(map[string]models.SetDeviceServiceStatusRequest)
+		copy := make(map[string]models.SetDeviceServiceStatusRequest)
+		for service, status := range r.serviceStatuses {
+			reportedStatus, ok := r.reportedServiceStatuses[service]
+			if !ok ||
+				(reportedStatus.CurrentReleaseID != status.CurrentReleaseID ||
+					reportedStatus.CurrentState != status.CurrentState ||
+					reportedStatus.ErrorMessage != status.ErrorMessage) {
+				diff[service] = status
 			}
-			copy[service] = release
+			copy[service] = status
 		}
 		r.lock.RUnlock()
 
-		for serviceName, release := range diff {
+		for serviceName, status := range diff {
 			ctx, cancel = dpcontext.New(r.ctx, time.Minute)
 
-			if err := r.reportServiceStatus(ctx, r.applicationID, serviceName, release); err != nil {
+			if err := r.reportServiceStatus(
+				ctx,
+				r.applicationID,
+				serviceName,
+				status.CurrentReleaseID,
+				status.CurrentState,
+				status.ErrorMessage,
+			); err != nil {
 				log.WithError(err).Error("report service status")
 				goto cont
 			}
@@ -158,7 +168,7 @@ func (r *Reporter) serviceStatusReporter() {
 			cancel()
 		}
 
-		r.reportedServiceReleases = copy
+		r.reportedServiceStatuses = copy
 
 	cont:
 		select {

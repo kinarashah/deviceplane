@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/deviceplane/deviceplane/pkg/agent/utils"
 	"github.com/deviceplane/deviceplane/pkg/agent/validator"
 	"github.com/deviceplane/deviceplane/pkg/agent/variables"
 	dpcontext "github.com/deviceplane/deviceplane/pkg/context"
@@ -16,8 +15,8 @@ import (
 type Supervisor struct {
 	engine                  engine.Engine
 	variables               variables.Interface
-	reportApplicationStatus func(ctx *dpcontext.Context, applicationID string, currentReleaseID string) error
-	reportServiceStatus     func(ctx *dpcontext.Context, applicationID, service, currentReleaseID string) error
+	reportApplicationStatus func(ctx *dpcontext.Context, applicationID, currentReleaseID string) error
+	reportServiceStatus     func(ctx *dpcontext.Context, applicationID, service, currentReleaseID string, state models.ServiceState, errorMessage string) error
 	validators              []validator.Validator
 
 	applicationIDs         map[string]struct{}
@@ -33,7 +32,7 @@ func NewSupervisor(
 	engine engine.Engine,
 	variables variables.Interface,
 	reportApplicationStatus func(ctx *dpcontext.Context, applicationID, currentReleaseID string) error,
-	reportServiceStatus func(ctx *dpcontext.Context, applicationID, service, currentReleaseID string) error,
+	reportServiceStatus func(ctx *dpcontext.Context, applicationID, service, currentReleaseID string, state models.ServiceState, errorMessage string) error,
 	validators []validator.Validator,
 ) *Supervisor {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -116,7 +115,7 @@ func (s *Supervisor) containerGC() {
 	defer ticker.Stop()
 
 	for {
-		instances, err := utils.ContainerList(s.ctx, s.engine, map[string]struct{}{
+		instances, err := containerList(s.ctx, s.engine, map[string]struct{}{
 			models.ApplicationLabel: struct{}{},
 		}, nil, true)
 		if err != nil {
@@ -129,10 +128,10 @@ func (s *Supervisor) containerGC() {
 			if _, ok := s.applicationSupervisors[applicationID]; !ok {
 				// TODO: this could start many goroutines
 				go func(instanceID string) {
-					if err = utils.ContainerStop(s.ctx, s.engine, instanceID); err != nil {
+					if err = containerStop(s.ctx, s.engine, instanceID); err != nil {
 						return
 					}
-					if err = utils.ContainerRemove(s.ctx, s.engine, instanceID); err != nil {
+					if err = containerRemove(s.ctx, s.engine, instanceID); err != nil {
 						return
 					}
 				}(instance.ID)

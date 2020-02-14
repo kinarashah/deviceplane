@@ -191,12 +191,26 @@ type DeviceApplicationStatus struct {
 }
 
 type DeviceServiceStatus struct {
-	ProjectID        string `json:"projectId" yaml:"projectId"`
-	DeviceID         string `json:"deviceId" yaml:"deviceId"`
-	ApplicationID    string `json:"applicationId" yaml:"applicationId"`
-	Service          string `json:"service" yaml:"service"`
-	CurrentReleaseID string `json:"currentReleaseId" yaml:"currentReleaseId"`
+	ProjectID        string       `json:"projectId" yaml:"projectId"`
+	DeviceID         string       `json:"deviceId" yaml:"deviceId"`
+	ApplicationID    string       `json:"applicationId" yaml:"applicationId"`
+	Service          string       `json:"service" yaml:"service"`
+	CurrentReleaseID string       `json:"currentReleaseId" yaml:"currentReleaseId"`
+	CurrentState     ServiceState `json:"currentState" yaml:"currentState"`
+	ErrorMessage     string       `json:"errorMessage" yaml:"errorMessage"`
 }
+
+type ServiceState string
+
+const (
+	ServiceUnknownStatus             ServiceState = "Unknown"
+	ServiceImagePulling              ServiceState = "Pulling"
+	ServiceContainerCreating         ServiceState = "Creating"
+	ServiceRemovingPreviousContainer ServiceState = "Removing previous container"
+	ServiceContainerStarting         ServiceState = "Starting"
+	ServiceContainerRunning          ServiceState = "Running"
+	ServiceContainerExited           ServiceState = "Exited"
+)
 
 type MembershipFull1 struct {
 	Membership
